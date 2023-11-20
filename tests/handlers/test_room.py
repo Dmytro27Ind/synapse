@@ -1,5 +1,6 @@
 import synapse
 from synapse.api.constants import EventTypes, RoomEncryptionAlgorithms
+from synapse.handlers.room_list import _matches_room_entry
 from synapse.rest.client import login, room
 
 from tests import unittest
@@ -106,3 +107,44 @@ class EncryptedByDefaultTestCase(unittest.HomeserverTestCase):
             tok=user_token,
             expect_code=404,
         )
+
+class RoomListTestCase(unittest.TestCase):
+    def test_matches_room_entry_generic_search_term_name(self):
+        room_entry = {"name": "Test Room", "topic": "Discussion", "canonical_alias": "#test:example.com"}
+        search_filter = {"generic_search_term": "Test"}
+
+        result = _matches_room_entry(room_entry, search_filter)
+
+        self.assertTrue(result)
+
+    def test_matches_room_entry_generic_search_term_topic(self):
+        room_entry = {"name": "Test Room", "topic": "Discussion", "canonical_alias": "#test:example.com"}
+        search_filter = {"generic_search_term": "Discussion"}
+
+        result = _matches_room_entry(room_entry, search_filter)
+
+        self.assertTrue(result)
+
+    def test_matches_room_entry_generic_search_term_canonical_alias(self):
+        room_entry = {"name": "Test Room", "topic": "Discussion", "canonical_alias": "#test:example.com"}
+        search_filter = {"generic_search_term": "#test:example.com"}
+
+        result = _matches_room_entry(room_entry, search_filter)
+
+        self.assertTrue(result)
+
+    def test_matches_room_entry_no_generic_search_term(self):
+        room_entry = {"name": "Test Room", "topic": "Discussion", "canonical_alias": "#test:example.com"}
+        search_filter = {}
+
+        result = _matches_room_entry(room_entry, search_filter)
+
+        self.assertTrue(result)
+
+    def test_does_not_match_room_entry_with_generic_search_term(self):
+        room_entry = {"name": "Test Room", "topic": "Discussion", "canonical_alias": "#test:example.com"}
+        search_filter = {"generic_search_term": "Nonexistent"}
+
+        result = _matches_room_entry(room_entry, search_filter)
+
+        self.assertFalse(result)

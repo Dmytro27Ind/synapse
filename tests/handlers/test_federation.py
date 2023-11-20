@@ -25,12 +25,14 @@ from synapse.api.errors import (
     Codes,
     LimitExceededError,
     NotFoundError,
+    RequestSendFailed,
     SynapseError,
 )
 from synapse.api.room_versions import RoomVersions
 from synapse.events import EventBase, make_event_from_dict
 from synapse.federation.federation_base import event_from_pdu_json
 from synapse.federation.federation_client import SendJoinResult
+from synapse.handlers.federation import FederationHandler
 from synapse.logging.context import LoggingContext, run_in_background
 from synapse.rest import admin
 from synapse.rest.client import login, room
@@ -500,7 +502,164 @@ class FederationTestCase(unittest.FederatingHomeserverTestCase):
         self.assertEqual(r[(EventTypes.Member, other_user)], join_event.event_id)
 
         return join_event
+    
+    async def test_send_invite_success(self):
+        """Test send_invite function for successful invite."""
+        target_host = "synapse.test.com"
+        
+        # Create a Mock object for EventBase
+        event = Mock()
 
+        federation_instance = FederationHandler(self.hs)
+
+        # Mock the send_invite method to simulate a successful call
+        with patch.object(
+            federation_instance.federation_client,
+            "send_invite",
+            new_callable=AsyncMock,
+            return_value=event,
+        ):
+            result = await federation_instance.send_invite(target_host, event)
+
+        # Assert that the result is the expected EventBase instance
+        self.assertEqual(result, event)
+
+    async def test_send_invite_failure(self):
+        """Test send_invite function for failure to connect."""
+
+        federation_instance = FederationHandler(self.hs)
+        
+        # Create a Mock object for EventBase
+        event = Mock()
+
+        # Mock the send_invite method to simulate a RequestSendFailed exception
+        with patch.object(
+            federation_instance.federation_client,
+            "send_invite",
+            new_callable=AsyncMock,
+            side_effect=RequestSendFailed(RuntimeError(""), can_retry=False),
+        ):
+            # Assert that the function raises a SynapseError with the expected message
+            with self.assertRaisesRegex(SynapseError, "Can't connect to server"):
+                await federation_instance.send_invite("synapse.test.com", event)
+
+    async def test_do_knock_missing_knock_room_state(self):
+        """Test error handling when 'knock_room_state' is missing in send_knock response."""
+
+        federation_instance = FederationHandler(self.hs)
+        
+        # Mock _make_and_verify_event to return a valid tuple
+        federation_instance._make_and_verify_event = AsyncMock(return_value=("synapse.test.com", Mock(), "1"))
+
+        # Mock _maybe_store_room_on_outlier_membership
+        federation_instance._maybe_store_room_on_outlier_membership = AsyncMock()
+
+        # Mock send_knock to return a response without 'knock_room_state'
+        federation_instance.federation_client.send_knock = AsyncMock(return_value={})
+
+        # Call do_knock and expect a KeyError
+        with self.assertRaisesRegex(KeyError, "Missing 'knock_room_state' field in send_knock response"):
+            await federation_instance.do_knock(
+                target_hosts=["synapse.test.com"],
+                room_id="room_id",
+                knockee="knockee",
+                content={"key": "value"}
+            )
+    
+    async def test_do_knock_successful(self):
+        """Test successful knocking on a room."""
+
+        federation_instance = FederationHandler(self.hs)
+        EVENT_ID = 22
+        STREAM_ID = 33
+
+        # Create a mock event to be returned by _make_and_verify_event
+        mock_event = Mock(spec=["event_id", "internal_metadata", "room_id"])
+        mock_event.configure_mock(unsigned={})
+        mock_event.configure_mock(event_id=EVENT_ID)
+
+        # Mock _make_and_verify_event to return the mock event
+        federation_instance._make_and_verify_event = AsyncMock(return_value=("synapse.test.com", mock_event, "1"))
+
+        # Mock _maybe_store_room_on_outlier_membership
+        federation_instance._maybe_store_room_on_outlier_membership = AsyncMock()
+        
+        # Mock send_knock to return a response with stripped room state
+        federation_instance.federation_client.send_knock = AsyncMock(return_value={"knock_room_state": {"event_id": "state_event_id"}})        
+
+        # Mock persist_events_and_notify
+        federation_instance._federation_event_handler.persist_events_and_notify = AsyncMock(return_value=STREAM_ID)
+
+        # Call do_knock
+        event_id, stream_id = await federation_instance.do_knock(
+            target_hosts=["synapse.test.com"],
+            room_id="room_id",
+            knockee="knockee",
+            content={"key": "value"}
+        )
+
+        # Assert that the expected values are returned
+        self.assertEqual(event_id, mock_event.event_id)
+        self.assertEqual(stream_id, STREAM_ID)
+
+        # # Assert that the event has the correct internal metadata flags set
+        self.assertTrue(mock_event.internal_metadata.outlier)
+        self.assertTrue(mock_event.internal_metadata.out_of_band_membership)
+
+        # # Assert that the room state is stored in the unsigned key
+        self.assertEqual(mock_event.unsigned["knock_room_state"], {"event_id": "state_event_id"})
+
+    async def test_check_key_revocation_success(self):
+        """Test _check_key_revocation for a valid public key."""
+
+        federation_instance = FederationHandler(self.hs)
+        public_key = "base64encodedpublickey"
+        url = "https://key_revocation.com"
+
+        # Mock the http_client.get_json method to simulate a successful response
+        federation_instance.http_client.get_json = AsyncMock(return_value={"valid": True})
+
+        # Call _check_key_revocation
+        await federation_instance._check_key_revocation(public_key, url)
+
+        # Assert that http_client.get_json was called with the correct arguments
+        federation_instance.http_client.get_json.assert_called_once_with(url, {"public_key": public_key})
+
+    async def test_check_key_revocation_failure(self):
+        """Test _check_key_revocation for a revoked public key."""
+
+        federation_instance = FederationHandler(self.hs)
+        public_key = "base64encodedpublickey"
+        url = "https://key_revocation.com"
+
+        # Mock the http_client.get_json method to simulate a response with incorrect key
+        federation_instance.http_client.get_json = AsyncMock(return_value={"valid": False})
+
+        # Call _check_key_revocation and expect an AuthError
+        with self.assertRaises(AuthError) as context:
+            await federation_instance._check_key_revocation(public_key, url)
+
+        # Assert the expected error code and message
+        self.assertEqual(context.exception.code, 403)
+        self.assertEqual(context.exception.msg, "Third party certificate was invalid")
+
+    async def test_check_key_revocation_transient_error(self):
+        """Test _check_key_revocation for a transient error."""
+
+        federation_instance = FederationHandler(self.hs)
+        public_key = "base64encodedpublickey"
+        url = "https://key_revocation.com"
+
+        # Mock the http_client.get_json method to simulate a transient error
+        federation_instance.http_client.get_json = AsyncMock(side_effect=Exception("Transient error"))
+
+        # Call _check_key_revocation and expect a SynapseError
+        with self.assertRaises(SynapseError) as context:
+            await federation_instance._check_key_revocation(public_key, url)
+
+        # Assert the expected error code and message
+        self.assertEqual(context.exception.code, 502)
+        self.assertEqual(context.exception.msg, "Third party certificate could not be checked")
 
 class EventFromPduTestCase(TestCase):
     def test_valid_json(self) -> None:
