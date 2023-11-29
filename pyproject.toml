@@ -375,6 +375,10 @@ myst-parser = {version = "^1.0.0", python = "^3.8"}
 furo = ">=2022.12.7,<2024.0.0"
 
 
+
+[tool.poetry.group.dev.dependencies]
+coverage = "^7.3.2"
+
 [build-system]
 # The upper bounds here are defensive, intended to prevent situations like
 # #13849 and #14079 where we see buildtime or runtime errors caused by build
